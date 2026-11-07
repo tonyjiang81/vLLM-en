@@ -1,0 +1,428 @@
+# Prefill / Decode disaggregation entry for CUDA clusters.
+# Prefill = kv_producer, Decode = kv_consumer via NixlConnector.
+# Front door is pd-proxy (OpenAI-compatible). Swap proxy for Dynamo/vllm-router when needed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pd-kv-prefill
+  namespace: vllm-gpu
+  labels:
+    stage: "3"
+    role: prefill
+data:
+  kv-transfer-config.json: |
+    {
+      "kv_connector": "NixlConnector",
+      "kv_role": "kv_producer",
+      "kv_connector_extra_config": {}
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pd-kv-decode
+  namespace: vllm-gpu
+  labels:
+    stage: "3"
+    role: decode
+data:
+  kv-transfer-config.json: |
+    {
+      "kv_connector": "NixlConnector",
+      "kv_role": "kv_consumer",
+      "kv_connector_extra_config": {}
+    }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pd-proxy-code
+  namespace: vllm-gpu
+  labels:
+    stage: "3"
+data:
+  proxy.py: |
+    #!/usr/bin/env python3
+    """PD front door: warm Prefill then serve Decode (OpenAI-compatible)."""
+    import json
+    import os
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    PREFILL = os.environ.get("PREFILL_URL", "http://vllm-prefill:8000").rstrip("/")
+    DECODE = os.environ.get("DECODE_URL", "http://vllm-decode:8000").rstrip("/")
+    PORT = int(os.environ.get("PORT", "8000"))
+
+    def post_json(url, payload):
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            return resp.status, resp.read(), resp.headers.get("Content-Type", "application/json")
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+
+        def do_GET(self):
+            if self.path in ("/health", "/ready"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+                return
+            if self.path == "/metrics":
+                try:
+                    with urllib.request.urlopen(DECODE + "/metrics", timeout=10) as resp:
+                        body = resp.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4")
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as exc:
+                    self.send_response(502)
+                    self.end_headers()
+                    self.wfile.write(str(exc).encode())
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"invalid json")
+                return
+            warm = dict(payload)
+            warm["max_tokens"] = 1
+            if "stream" in warm:
+                warm["stream"] = False
+            try:
+                post_json(PREFILL + self.path, warm)
+                status, body, ctype = post_json(DECODE + self.path, payload)
+            except Exception as exc:
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(("pd proxy error: %s" % exc).encode())
+                return
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.end_headers()
+            self.wfile.write(body)
+
+    if __name__ == "__main__":
+        print("pd proxy prefill=%s decode=%s port=%s" % (PREFILL, DECODE, PORT))
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-prefill
+  namespace: vllm-gpu
+  labels:
+    app: vllm-prefill
+    role: prefill
+    stage: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-prefill
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-prefill
+        role: prefill
+        stage: "3"
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.5
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          env:
+            - name: HOME
+              value: /data
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - Qwen/Qwen2.5-7B-Instruct
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --gpu-memory-utilization
+            - "0.90"
+            - --max-model-len
+            - "8192"
+            - --max-num-seqs
+            - "32"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --kv-transfer-config
+            - /etc/vllm/kv-transfer-config.json
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 90
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+            - name: kv-cfg
+              mountPath: /etc/vllm
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 80Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: kv-cfg
+          configMap:
+            name: pd-kv-prefill
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-decode
+  namespace: vllm-gpu
+  labels:
+    app: vllm-decode
+    role: decode
+    stage: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-decode
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-decode
+        role: decode
+        stage: "3"
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.5
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              add: ["IPC_LOCK", "SYS_RESOURCE"]
+          env:
+            - name: HOME
+              value: /data
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - Qwen/Qwen2.5-7B-Instruct
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --gpu-memory-utilization
+            - "0.90"
+            - --max-model-len
+            - "8192"
+            - --max-num-seqs
+            - "64"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --kv-transfer-config
+            - /etc/vllm/kv-transfer-config.json
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 90
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+            - name: kv-cfg
+              mountPath: /etc/vllm
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 80Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: kv-cfg
+          configMap:
+            name: pd-kv-decode
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pd-proxy
+  namespace: vllm-gpu
+  labels:
+    app: pd-proxy
+    stage: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pd-proxy
+  template:
+    metadata:
+      labels:
+        app: pd-proxy
+        stage: "3"
+    spec:
+      containers:
+        - name: proxy
+          image: python:3.12-slim
+          command: ["python3", "/app/proxy.py"]
+          env:
+            - name: PREFILL_URL
+              value: http://vllm-prefill:8000
+            - name: DECODE_URL
+              value: http://vllm-decode:8000
+            - name: PORT
+              value: "8000"
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 128Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: pd-proxy-code
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-prefill
+  namespace: vllm-gpu
+  labels:
+    app: vllm-prefill
+    stage: "3"
+spec:
+  selector:
+    app: vllm-prefill
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-decode
+  namespace: vllm-gpu
+  labels:
+    app: vllm-decode
+    stage: "3"
+spec:
+  selector:
+    app: vllm-decode
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-pd
+  namespace: vllm-gpu
+  labels:
+    app: pd-proxy
+    stage: "3"
+spec:
+  selector:
+    app: pd-proxy
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

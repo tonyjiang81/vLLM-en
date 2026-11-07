@@ -1,0 +1,261 @@
+# Dual vLLM CPU replicas for Stage2 topology drill.
+# No real LMCache connector (CUDA deps). Cross-pod shared KV is exercised via lmcache-mock + SeaweedFS.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-a
+  namespace: vllm-cpu
+  labels:
+    app: vllm-a
+    role: shared-kv
+    stage: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-a
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-a
+        role: shared-kv
+        stage: "2"
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai-cpu:v0.33.0-x86_64
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              add: ["SYS_NICE"]
+              drop: ["ALL"]
+            seccompProfile:
+              type: Unconfined
+          env:
+            - name: HOME
+              value: /data
+            - name: XDG_CACHE_HOME
+              value: /data/.cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: TORCH_HOME
+              value: /data/.cache/torch
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CPU_KVCACHE_SPACE
+              value: "1"
+            - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - facebook/opt-125m
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "256"
+            - --max-num-seqs
+            - "2"
+            - --gpu-memory-utilization
+            - "0.50"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --enforce-eager
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 3Gi
+            limits:
+              cpu: "3"
+              memory: 6Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-b
+  namespace: vllm-cpu
+  labels:
+    app: vllm-b
+    role: shared-kv
+    stage: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-b
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-b
+        role: shared-kv
+        stage: "2"
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai-cpu:v0.33.0-x86_64
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              add: ["SYS_NICE"]
+              drop: ["ALL"]
+            seccompProfile:
+              type: Unconfined
+          env:
+            - name: HOME
+              value: /data
+            - name: XDG_CACHE_HOME
+              value: /data/.cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: TORCH_HOME
+              value: /data/.cache/torch
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CPU_KVCACHE_SPACE
+              value: "1"
+            - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - facebook/opt-125m
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "256"
+            - --max-num-seqs
+            - "2"
+            - --gpu-memory-utilization
+            - "0.50"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --enforce-eager
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 3Gi
+            limits:
+              cpu: "3"
+              memory: 6Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-a
+  namespace: vllm-cpu
+  labels:
+    app: vllm-a
+    stage: "2"
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-a
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-b
+  namespace: vllm-cpu
+  labels:
+    app: vllm-b
+    stage: "2"
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

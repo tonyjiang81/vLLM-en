@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seaweed-create-kv-cache-bucket
+  namespace: vllm-cpu
+  labels:
+    stage: "2"
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: seaweed-create-kv-cache-bucket
+        stage: "2"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: amazon/aws-cli:2.15.57
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: accesskey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: secretkey
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: AWS_EC2_METADATA_DISABLED
+              value: "true"
+            - name: AWS_ENDPOINT
+              value: http://seaweedfs.kubeflow.svc:8333
+            - name: BUCKET
+              value: kv-cache
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              aws --endpoint-url "$AWS_ENDPOINT" --cli-connect-timeout 10 --cli-read-timeout 30 \
+                s3 mb "s3://${BUCKET}" || true
+              aws --endpoint-url "$AWS_ENDPOINT" --cli-connect-timeout 10 --cli-read-timeout 30 \
+                s3 ls "s3://${BUCKET}"
+              echo "bucket ready: ${BUCKET}"

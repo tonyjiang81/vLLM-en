@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-single
+  namespace: vllm-gpu
+  labels:
+    app: vllm-single
+    stage: "1"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-single
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-single
+        stage: "1"
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.5
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /data
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: compute,utility
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - Qwen/Qwen2.5-7B-Instruct
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --tensor-parallel-size
+            - "1"
+            - --gpu-memory-utilization
+            - "0.92"
+            - --max-model-len
+            - "8192"
+            - --max-num-seqs
+            - "64"
+            - --max-num-batched-tokens
+            - "8192"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 90
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 300
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 80Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi

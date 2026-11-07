@@ -1,0 +1,176 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-vllm-gpu
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: vllm-gpu
+data:
+  vllm-gpu-lab.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "type": "text",
+          "title": "About",
+          "gridPos": { "h": 3, "w": 24, "x": 0, "y": 0 },
+          "options": {
+            "mode": "markdown",
+            "content": "**vLLM GPU (CUDA)** dashboard. Stage1=`vllm-single` · Stage2=`vllm-a`/`vllm-b`+`lmcache` · Stage3=`prefill`/`decode`/`pd-proxy`.\nPrimary signals: **DCGM GPU util / FB used**, `vllm:kv_cache_usage_perc`, latency, prefix cache."
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "GPU utilization (DCGM)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 3 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_GPU_UTIL",
+              "legendFormat": "gpu{{gpu}} {{Hostname}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "percent", "min": 0, "max": 100 },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "GPU FB memory used (DCGM)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 3 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_FB_USED",
+              "legendFormat": "fb used gpu{{gpu}} {{Hostname}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "decmbytes", "min": 0 },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "KV cache usage",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 11 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "vllm:kv_cache_usage_perc{namespace=\"vllm-gpu\", stage=~\"$stage\", service=~\"$service\"}",
+              "legendFormat": "s{{stage}} {{service}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Requests running / waiting",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 11 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "vllm:num_requests_running{namespace=\"vllm-gpu\", stage=~\"$stage\", service=~\"$service\"}",
+              "legendFormat": "running s{{stage}} {{service}}",
+              "refId": "A"
+            },
+            {
+              "expr": "vllm:num_requests_waiting{namespace=\"vllm-gpu\", stage=~\"$stage\", service=~\"$service\"}",
+              "legendFormat": "waiting s{{stage}} {{service}}",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "E2E latency p95",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le, stage, service) (rate(vllm:e2e_request_latency_seconds_bucket{namespace=\"vllm-gpu\", stage=~\"$stage\", service=~\"$service\"}[1m])))",
+              "legendFormat": "p95 s{{stage}} {{service}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "s" },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Prefix cache query rate",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 19 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum by (stage, service) (rate(vllm:prefix_cache_queries_total{namespace=\"vllm-gpu\", stage=~\"$stage\", service=~\"$service\"}[1m]))",
+              "legendFormat": "s{{stage}} {{service}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "stat",
+          "title": "Targets up (vllm-gpu)",
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 27 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "count by (stage) (up{namespace=\"vllm-gpu\", stage=~\"$stage\"} == 1)",
+              "legendFormat": "stage {{stage}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["vllm", "gpu", "cuda"],
+      "templating": {
+        "list": [
+          {
+            "name": "stage",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(up{namespace=\"vllm-gpu\"}, stage)",
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2,
+            "sort": 1
+          },
+          {
+            "name": "service",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(up{namespace=\"vllm-gpu\", stage=~\"$stage\"}, service)",
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2,
+            "sort": 1
+          }
+        ]
+      },
+      "time": { "from": "now-30m", "to": "now" },
+      "timezone": "browser",
+      "title": "vLLM GPU",
+      "uid": "vllm-gpu",
+      "version": 1
+    }

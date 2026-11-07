@@ -1,0 +1,105 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-config
+  namespace: vllm-gpu
+  labels:
+    app: lmcache
+    stage: "2"
+data:
+  lmcache.yaml: |
+    chunk_size: 256
+    local_cpu: true
+    max_local_cpu_size: 8
+    remote_url: "s3://kv-cache-gpu"
+    remote_serde: "naive"
+    s3:
+      endpoint: "http://seaweedfs.kubeflow.svc:8333"
+      # credentials injected via env from Secret seaweed-s3
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache
+  namespace: vllm-gpu
+  labels:
+    app: lmcache
+    stage: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmcache
+  template:
+    metadata:
+      labels:
+        app: lmcache
+        stage: "2"
+    spec:
+      containers:
+        - name: lmcache
+          image: lmcache/lmcache-vllm:v0.3.1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LMCACHE_CONFIG_FILE
+              value: /etc/lmcache/lmcache.yaml
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: accesskey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: secretkey
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - lmcache_server
+            - --host
+            - 0.0.0.0
+            - --port
+            - "6555"
+          ports:
+            - name: http
+              containerPort: 6555
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/lmcache
+              readOnly: true
+      volumes:
+        - name: cfg
+          configMap:
+            name: lmcache-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache
+  namespace: vllm-gpu
+  labels:
+    app: lmcache
+    stage: "2"
+spec:
+  type: ClusterIP
+  selector:
+    app: lmcache
+  ports:
+    - name: http
+      port: 6555
+      targetPort: http

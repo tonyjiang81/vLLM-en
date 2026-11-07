@@ -1,0 +1,426 @@
+# Fake Prefill/Decode topology for CPU lab.
+# Proxy: warm Prefill (max_tokens=1) then serve Decode. Not NIXL / real KV handoff.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pd-proxy-code
+  namespace: vllm-cpu
+  labels:
+    stage: "3"
+    mock: "true"
+data:
+  proxy.py: |
+    #!/usr/bin/env python3
+    """Minimal fake PD proxy: call Prefill once, then Decode for the client."""
+    import json
+    import os
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    PREFILL = os.environ.get("PREFILL_URL", "http://vllm-prefill:8000").rstrip("/")
+    DECODE = os.environ.get("DECODE_URL", "http://vllm-decode:8000").rstrip("/")
+    PORT = int(os.environ.get("PORT", "8000"))
+
+    def post_json(url: str, payload: dict) -> tuple[int, bytes, str]:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            return resp.status, resp.read(), resp.headers.get("Content-Type", "application/json")
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+
+        def do_GET(self):
+            if self.path in ("/health", "/ready"):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok")
+                return
+            if self.path == "/metrics":
+                try:
+                    with urllib.request.urlopen(DECODE + "/metrics", timeout=10) as resp:
+                        body = resp.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain; version=0.0.4")
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as exc:
+                    self.send_response(502)
+                    self.end_headers()
+                    self.wfile.write(str(exc).encode())
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            try:
+                payload = json.loads(raw.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"invalid json")
+                return
+
+            warm = dict(payload)
+            warm["max_tokens"] = 1
+            if "stream" in warm:
+                warm["stream"] = False
+            try:
+                post_json(PREFILL + self.path, warm)
+                status, body, ctype = post_json(DECODE + self.path, payload)
+            except Exception as exc:
+                self.send_response(502)
+                self.end_headers()
+                self.wfile.write(("pd proxy error: %s" % exc).encode())
+                return
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.end_headers()
+            self.wfile.write(body)
+
+    if __name__ == "__main__":
+        print("fake PD proxy prefill=%s decode=%s port=%s" % (PREFILL, DECODE, PORT))
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-prefill
+  namespace: vllm-cpu
+  labels:
+    app: vllm-prefill
+    role: prefill
+    stage: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-prefill
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-prefill
+        role: prefill
+        stage: "3"
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai-cpu:v0.33.0-x86_64
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              add: ["SYS_NICE"]
+              drop: ["ALL"]
+            seccompProfile:
+              type: Unconfined
+          env:
+            - name: HOME
+              value: /data
+            - name: XDG_CACHE_HOME
+              value: /data/.cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: TORCH_HOME
+              value: /data/.cache/torch
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CPU_KVCACHE_SPACE
+              value: "1"
+            - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - facebook/opt-125m
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "256"
+            - --max-num-seqs
+            - "2"
+            - --gpu-memory-utilization
+            - "0.50"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --enforce-eager
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 3Gi
+            limits:
+              cpu: "3"
+              memory: 6Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-decode
+  namespace: vllm-cpu
+  labels:
+    app: vllm-decode
+    role: decode
+    stage: "3"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-decode
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-decode
+        role: decode
+        stage: "3"
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai-cpu:v0.33.0-x86_64
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              add: ["SYS_NICE"]
+              drop: ["ALL"]
+            seccompProfile:
+              type: Unconfined
+          env:
+            - name: HOME
+              value: /data
+            - name: XDG_CACHE_HOME
+              value: /data/.cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: TORCH_HOME
+              value: /data/.cache/torch
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CPU_KVCACHE_SPACE
+              value: "1"
+            - name: VLLM_CPU_NUM_OF_RESERVED_CPU
+              value: "1"
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - facebook/opt-125m
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --max-model-len
+            - "256"
+            - --max-num-seqs
+            - "2"
+            - --gpu-memory-utilization
+            - "0.50"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --enforce-eager
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 10
+          resources:
+            requests:
+              cpu: "1"
+              memory: 3Gi
+            limits:
+              cpu: "3"
+              memory: 6Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 4Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pd-proxy
+  namespace: vllm-cpu
+  labels:
+    app: pd-proxy
+    stage: "3"
+    mock: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pd-proxy
+  template:
+    metadata:
+      labels:
+        app: pd-proxy
+        stage: "3"
+        mock: "true"
+    spec:
+      containers:
+        - name: proxy
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PREFILL_URL
+              value: http://vllm-prefill:8000
+            - name: DECODE_URL
+              value: http://vllm-decode:8000
+            - name: PORT
+              value: "8000"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          command: ["python", "/app/proxy.py"]
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "50m"
+              memory: 64Mi
+            limits:
+              cpu: "200m"
+              memory: 128Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: pd-proxy-code
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-prefill
+  namespace: vllm-cpu
+  labels:
+    app: vllm-prefill
+    stage: "3"
+spec:
+  selector:
+    app: vllm-prefill
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-decode
+  namespace: vllm-cpu
+  labels:
+    app: vllm-decode
+    stage: "3"
+spec:
+  selector:
+    app: vllm-decode
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-pd
+  namespace: vllm-cpu
+  labels:
+    app: pd-proxy
+    stage: "3"
+spec:
+  selector:
+    app: pd-proxy
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+

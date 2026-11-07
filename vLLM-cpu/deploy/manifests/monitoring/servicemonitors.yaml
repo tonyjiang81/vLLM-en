@@ -1,0 +1,56 @@
+# Scrape vLLM CPU lab metrics into cluster Prometheus (kube-prometheus-stack).
+# Requires label release=monitoring to match Prometheus serviceMonitorSelector.
+# Covers Stage1 (vllm-single), Stage2 (vllm-a/b + lmcache), Stage3 (prefill/decode/pd-proxy).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-cpu-engines
+  namespace: vllm-cpu
+  labels:
+    release: monitoring
+    app.kubernetes.io/part-of: vllm-cpu-lab
+    stage: "monitor"
+spec:
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - vllm-single
+          - vllm-a
+          - vllm-b
+          - vllm-prefill
+          - vllm-decode
+          - pd-proxy
+  # Propagate Service labels onto scraped series for Grafana stage/service filters.
+  targetLabels:
+    - app
+    - stage
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-cpu-lmcache-mock
+  namespace: vllm-cpu
+  labels:
+    release: monitoring
+    app.kubernetes.io/part-of: vllm-cpu-lab
+    stage: "monitor"
+spec:
+  selector:
+    matchLabels:
+      app: lmcache
+  targetLabels:
+    - app
+    - stage
+    - mock
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kv-transfer-config
+  namespace: vllm-gpu
+  labels:
+    stage: "2"
+data:
+  kv-transfer-config.json: |
+    {
+      "kv_connector": "LMCacheConnectorV1",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {
+        "lmcache.mp.host": "lmcache.vllm-gpu.svc",
+        "lmcache.mp.port": 6555
+      }
+    }

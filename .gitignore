@@ -1,0 +1,16 @@
+.DS_Store
+*.log
+*.pyc
+__pycache__/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.swp
+.idea/
+.vscode/
+tmp/
+/tmp/
+*.tar
+*.tgz

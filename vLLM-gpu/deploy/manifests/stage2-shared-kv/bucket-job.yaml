@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: seaweed-create-kv-cache-bucket
+  namespace: vllm-gpu
+  labels:
+    stage: "2"
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: create-bucket
+          image: amazon/aws-cli:2.17.0
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: accesskey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: secretkey
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+            - name: S3_ENDPOINT
+              value: http://seaweedfs.kubeflow.svc:8333
+            - name: BUCKET
+              value: kv-cache-gpu
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              aws --endpoint-url="${S3_ENDPOINT}" s3 mb "s3://${BUCKET}" 2>/dev/null || true
+              aws --endpoint-url="${S3_ENDPOINT}" s3 ls "s3://${BUCKET}"

@@ -1,0 +1,147 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-l2-adapter
+  namespace: vllm-cpu
+  labels:
+    stage: "2"
+data:
+  # Placeholders replaced by 02-deploy-stage2.sh with real keys from Seaweed secret.
+  l2-adapter.json: |
+    {
+      "type": "s3",
+      "s3_endpoint": "http://seaweedfs.kubeflow.svc:8333",
+      "s3_region": "us-east-1",
+      "disable_tls": true,
+      "aws_access_key_id": "__ACCESS_KEY__",
+      "aws_secret_access_key": "__SECRET_KEY__",
+      "max_capacity_gb": 5,
+      "eviction": {
+        "eviction_policy": "LRU",
+        "trigger_watermark": 0.85,
+        "eviction_ratio": 0.2
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache
+  namespace: vllm-cpu
+  labels:
+    app: lmcache
+    stage: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmcache
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: lmcache
+        stage: "2"
+    spec:
+      # Avoid the ~8GB CUDA lmcache/standalone image on this CPU lab node.
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: lmcache
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: HOME
+              value: /data
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+              mkdir -p /data
+              python -m venv /data/venv
+              /data/venv/bin/pip install --no-cache-dir 'lmcache==0.5.7'
+              ADAPTER="$(cat /config/l2-adapter.json)"
+              LMC=/data/venv/bin/lmcache
+              # Prefer engine_driven for CPU workers; fall back if flag unsupported.
+              if "$LMC" server --help 2>&1 | grep -q supported-transfer-mode; then
+                exec "$LMC" server \
+                  --host 0.0.0.0 \
+                  --port 6555 \
+                  --l1-size-gb 2 \
+                  --eviction-policy LRU \
+                  --max-workers 2 \
+                  --supported-transfer-mode engine_driven \
+                  --l2-adapter "${ADAPTER}"
+              else
+                exec "$LMC" server \
+                  --host 0.0.0.0 \
+                  --port 6555 \
+                  --l1-size-gb 2 \
+                  --eviction-policy LRU \
+                  --max-workers 2 \
+                  --l2-adapter "${ADAPTER}"
+              fi
+          ports:
+            - name: mp
+              containerPort: 6555
+          readinessProbe:
+            tcpSocket:
+              port: mp
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 36
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 3Gi
+          volumeMounts:
+            - name: l2
+              mountPath: /config
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: l2
+          configMap:
+            name: lmcache-l2-adapter
+        - name: data
+          emptyDir:
+            sizeLimit: 2Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache
+  namespace: vllm-cpu
+  labels:
+    app: lmcache
+    stage: "2"
+spec:
+  type: ClusterIP
+  selector:
+    app: lmcache
+  ports:
+    - name: mp
+      port: 6555
+      targetPort: mp

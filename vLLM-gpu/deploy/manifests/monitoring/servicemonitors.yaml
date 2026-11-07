@@ -1,0 +1,49 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-gpu-engines
+  namespace: vllm-gpu
+  labels:
+    release: monitoring
+    app.kubernetes.io/part-of: vllm-gpu
+spec:
+  selector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values:
+          - vllm-single
+          - vllm-a
+          - vllm-b
+          - vllm-prefill
+          - vllm-decode
+          - pd-proxy
+  targetLabels:
+    - app
+    - stage
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-gpu-lmcache
+  namespace: vllm-gpu
+  labels:
+    release: monitoring
+    app.kubernetes.io/part-of: vllm-gpu
+spec:
+  selector:
+    matchLabels:
+      app: lmcache
+  targetLabels:
+    - app
+    - stage
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

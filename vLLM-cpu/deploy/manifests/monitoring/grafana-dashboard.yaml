@@ -1,0 +1,250 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-vllm-cpu
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+    app.kubernetes.io/part-of: vllm-cpu-lab
+data:
+  vllm-cpu-lab.json: |
+    {
+      "annotations": { "list": [] },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "id": null,
+      "links": [],
+      "panels": [
+        {
+          "type": "text",
+          "title": "About this lab",
+          "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+          "options": {
+            "mode": "markdown",
+            "content": "**No real GPU on this node.** vLLM runs with `VLLM_PLATFORM=CPU`.\n\n- Stage1 = `vllm-single` · Stage2 = `vllm-a`/`vllm-b` + `lmcache` · Stage3 = `vllm-prefill`/`vllm-decode`/`pd-proxy`\n- Use **container CPU** and **KV cache usage** instead of GPU util.\n- Filter with the **stage** / **service** variables above."
+          }
+        },
+        {
+          "type": "stat",
+          "title": "Scrape targets up (by stage)",
+          "gridPos": { "h": 4, "w": 12, "x": 0, "y": 4 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "count by (stage) (up{namespace=\"vllm-cpu\", stage=~\"$stage\", service=~\"$service\"} == 1) or count by (stage) (up{namespace=\"vllm-cpu\", stage=~\"$stage\"} == 1)",
+              "legendFormat": "stage {{stage}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "none",
+            "textMode": "value_and_name"
+          }
+        },
+        {
+          "type": "stat",
+          "title": "vLLM engines up",
+          "gridPos": { "h": 4, "w": 12, "x": 12, "y": 4 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "count(up{namespace=\"vllm-cpu\", app=~\"vllm-.*\", stage=~\"$stage\", service=~\"$service\"} == 1)",
+              "legendFormat": "up",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "reduceOptions": { "calcs": ["lastNotNull"] },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "value"
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod CPU usage (cores)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum by (pod) (rate(container_cpu_usage_seconds_total{namespace=\"vllm-cpu\", container!=\"\", container!=\"POD\", pod=~\".*($service).*|.*\"}[1m]))",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "short", "min": 0 },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Pod memory working set",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum by (pod) (container_memory_working_set_bytes{namespace=\"vllm-cpu\", container!=\"\", container!=\"POD\"})",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "bytes", "min": 0 },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "KV cache usage (CPU virtual pool)",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "vllm:kv_cache_usage_perc{stage=~\"$stage\", service=~\"$service\"}",
+              "legendFormat": "s{{stage}} {{service}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Requests running / waiting",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "vllm:num_requests_running{stage=~\"$stage\", service=~\"$service\"}",
+              "legendFormat": "running s{{stage}} {{service}}",
+              "refId": "A"
+            },
+            {
+              "expr": "vllm:num_requests_waiting{stage=~\"$stage\", service=~\"$service\"}",
+              "legendFormat": "waiting s{{stage}} {{service}}",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "Prefix cache query rate",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum by (stage, service) (rate(vllm:prefix_cache_queries_total{stage=~\"$stage\", service=~\"$service\"}[1m]))",
+              "legendFormat": "s{{stage}} {{service}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "E2E request latency p95",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le, stage, service) (rate(vllm:e2e_request_latency_seconds_bucket{stage=~\"$stage\", service=~\"$service\"}[1m])))",
+              "legendFormat": "p95 s{{stage}} {{service}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "s" },
+            "overrides": []
+          }
+        },
+        {
+          "type": "timeseries",
+          "title": "Prompt / generation token rate",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            {
+              "expr": "sum by (stage, service) (rate(vllm:prompt_tokens_total{stage=~\"$stage\", service=~\"$service\"}[1m]))",
+              "legendFormat": "prompt s{{stage}} {{service}}",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (stage, service) (rate(vllm:generation_tokens_total{stage=~\"$stage\", service=~\"$service\"}[1m]))",
+              "legendFormat": "gen s{{stage}} {{service}}",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "LMCache mock hits/stores (Stage2)",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "targets": [
+            { "expr": "lmcache_mock_l1_hits", "legendFormat": "L1 hits", "refId": "A" },
+            { "expr": "lmcache_mock_l2_hits", "legendFormat": "L2 hits", "refId": "B" },
+            { "expr": "lmcache_mock_stores", "legendFormat": "stores", "refId": "C" }
+          ]
+        },
+        {
+          "type": "timeseries",
+          "title": "GPU util (expect empty / stale on this lab)",
+          "gridPos": { "h": 6, "w": 24, "x": 0, "y": 40 },
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "description": "DCGM GPU util is for real NVIDIA GPUs. This k3s node has no GPU for vLLM CPU lab; panel kept only to show the contrast.",
+          "targets": [
+            {
+              "expr": "DCGM_FI_DEV_GPU_UTIL",
+              "legendFormat": "gpu {{gpu}} {{Hostname}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": { "unit": "percent", "min": 0, "max": 100 },
+            "overrides": []
+          }
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["vllm", "cpu-lab", "stage1", "stage2", "stage3"],
+      "templating": {
+        "list": [
+          {
+            "name": "stage",
+            "label": "stage",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(up{namespace=\"vllm-cpu\"}, stage)",
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2,
+            "sort": 1
+          },
+          {
+            "name": "service",
+            "label": "service",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus" },
+            "query": "label_values(up{namespace=\"vllm-cpu\", stage=~\"$stage\"}, service)",
+            "includeAll": true,
+            "multi": true,
+            "allValue": ".*",
+            "current": { "text": "All", "value": "$__all" },
+            "refresh": 2,
+            "sort": 1
+          }
+        ]
+      },
+      "time": { "from": "now-30m", "to": "now" },
+      "timezone": "browser",
+      "title": "vLLM CPU Lab",
+      "uid": "vllm-cpu-lab",
+      "version": 4
+    }

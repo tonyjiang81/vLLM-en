@@ -1,0 +1,347 @@
+# CPU lab mock for cross-pod shared KV ops.
+# Not real LMCache/Mooncake. L1=memory, L2=SeaweedFS S3 (optional).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lmcache-mock-code
+  namespace: vllm-cpu
+  labels:
+    stage: "2"
+    mock: "true"
+data:
+  server.py: |
+    #!/usr/bin/env python3
+    """Minimal shared-KV mock: PUT/GET by key, optional S3 L2, Prometheus counters."""
+    from __future__ import annotations
+
+    import hashlib
+    import json
+    import os
+    import threading
+    import time
+    import urllib.error
+    import urllib.request
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    PORT = int(os.environ.get("PORT", "6555"))
+    L1_MAX = int(os.environ.get("L1_MAX_ITEMS", "256"))
+    S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "").rstrip("/")
+    S3_BUCKET = os.environ.get("S3_BUCKET", "kv-cache")
+    AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "")
+    AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
+
+    _lock = threading.Lock()
+    _l1: dict[str, bytes] = {}
+    _l1_order: list[str] = []
+    _stats = {
+        "l1_hits": 0,
+        "l1_misses": 0,
+        "l2_hits": 0,
+        "l2_misses": 0,
+        "stores": 0,
+        "store_l2_ok": 0,
+        "store_l2_fail": 0,
+    }
+
+    def _sign_headers(method: str, path: str, payload: bytes | None = None) -> dict:
+        # SeaweedFS accepts AWS Signature V2-ish or unsigned with basic keys on some setups.
+        # Use simple path-style requests with static keys via custom header fallback:
+        # Prefer botocore-free unsigned + query? Many Seaweed installs need SigV4.
+        # For lab reliability we use the weed-compatible unsigned path when possible
+        # and fall back to storing L1-only if S3 rejects.
+        headers = {
+            "Host": S3_ENDPOINT.split("://", 1)[-1],
+            "Content-Type": "application/octet-stream",
+            "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
+            "x-amz-date": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()),
+        }
+        if AWS_ACCESS_KEY_ID:
+            # Very small SigV2 Authorization for SeaweedFS compatibility in labs.
+            # Not production-grade; mock only.
+            from email.utils import formatdate
+
+            date = formatdate(usegmt=True)
+            headers["Date"] = date
+            resource = f"/{S3_BUCKET}{path}"
+            string_to_sign = f"{method}\n\n{headers['Content-Type']}\n{date}\n{resource}"
+            import hmac
+            import base64
+
+            dig = hmac.new(
+                AWS_SECRET_ACCESS_KEY.encode("utf-8"),
+                string_to_sign.encode("utf-8"),
+                hashlib.sha1,
+            ).digest()
+            sig = base64.b64encode(dig).decode("ascii")
+            headers["Authorization"] = f"AWS {AWS_ACCESS_KEY_ID}:{sig}"
+        if payload is not None:
+            headers["Content-Length"] = str(len(payload))
+        return headers
+
+    def _s3_url(key: str) -> str:
+        return f"{S3_ENDPOINT}/{S3_BUCKET}/{key}"
+
+    def l2_get(key: str) -> bytes | None:
+        if not S3_ENDPOINT:
+            return None
+        path = f"/{key}"
+        req = urllib.request.Request(
+            _s3_url(key),
+            method="GET",
+            headers=_sign_headers("GET", path),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.read()
+        except Exception:
+            return None
+
+    def l2_put(key: str, value: bytes) -> bool:
+        if not S3_ENDPOINT:
+            return False
+        path = f"/{key}"
+        req = urllib.request.Request(
+            _s3_url(key),
+            data=value,
+            method="PUT",
+            headers=_sign_headers("PUT", path, value),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return 200 <= resp.status < 300
+        except Exception:
+            return False
+
+    def l1_put(key: str, value: bytes) -> None:
+        with _lock:
+            if key not in _l1 and len(_l1_order) >= L1_MAX:
+                old = _l1_order.pop(0)
+                _l1.pop(old, None)
+            _l1[key] = value
+            if key in _l1_order:
+                _l1_order.remove(key)
+            _l1_order.append(key)
+
+    def l1_get(key: str) -> bytes | None:
+        with _lock:
+            val = _l1.get(key)
+            if val is not None and key in _l1_order:
+                _l1_order.remove(key)
+                _l1_order.append(key)
+            return val
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            print("[%s] %s" % (self.log_date_time_string(), fmt % args))
+
+        def _send(self, code: int, body: bytes, content_type: str = "application/json"):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path in ("/health", "/ready"):
+                self._send(200, b'{"ok":true}')
+                return
+            if self.path == "/metrics":
+                with _lock:
+                    s = dict(_stats)
+                    l1_size = len(_l1)
+                lines = [
+                    "# HELP lmcache_mock_l1_hits L1 hits",
+                    "# TYPE lmcache_mock_l1_hits counter",
+                    f"lmcache_mock_l1_hits {s['l1_hits']}",
+                    "# HELP lmcache_mock_l1_misses L1 misses",
+                    "# TYPE lmcache_mock_l1_misses counter",
+                    f"lmcache_mock_l1_misses {s['l1_misses']}",
+                    "# HELP lmcache_mock_l2_hits L2 hits",
+                    "# TYPE lmcache_mock_l2_hits counter",
+                    f"lmcache_mock_l2_hits {s['l2_hits']}",
+                    "# HELP lmcache_mock_l2_misses L2 misses",
+                    "# TYPE lmcache_mock_l2_misses counter",
+                    f"lmcache_mock_l2_misses {s['l2_misses']}",
+                    "# HELP lmcache_mock_stores stores",
+                    "# TYPE lmcache_mock_stores counter",
+                    f"lmcache_mock_stores {s['stores']}",
+                    "# HELP lmcache_mock_l1_items current L1 items",
+                    "# TYPE lmcache_mock_l1_items gauge",
+                    f"lmcache_mock_l1_items {l1_size}",
+                    "",
+                ]
+                self._send(200, "\n".join(lines).encode(), "text/plain; version=0.0.4")
+                return
+            if self.path.startswith("/kv/"):
+                key = self.path[len("/kv/") :]
+                val = l1_get(key)
+                if val is not None:
+                    with _lock:
+                        _stats["l1_hits"] += 1
+                    self._send(200, val, "application/octet-stream")
+                    return
+                with _lock:
+                    _stats["l1_misses"] += 1
+                val = l2_get(key)
+                if val is not None:
+                    l1_put(key, val)
+                    with _lock:
+                        _stats["l2_hits"] += 1
+                    self._send(200, val, "application/octet-stream")
+                    return
+                with _lock:
+                    _stats["l2_misses"] += 1
+                self._send(404, b'{"error":"miss"}')
+                return
+            if self.path == "/stats":
+                with _lock:
+                    body = json.dumps({"stats": _stats, "l1_items": len(_l1)}).encode()
+                self._send(200, body)
+                return
+            self._send(404, b'{"error":"not found"}')
+
+        def do_PUT(self):
+            if not self.path.startswith("/kv/"):
+                self._send(404, b'{"error":"not found"}')
+                return
+            key = self.path[len("/kv/") :]
+            length = int(self.headers.get("Content-Length", "0"))
+            value = self.rfile.read(length)
+            l1_put(key, value)
+            ok = l2_put(key, value)
+            with _lock:
+                _stats["stores"] += 1
+                if ok:
+                    _stats["store_l2_ok"] += 1
+                else:
+                    _stats["store_l2_fail"] += 1
+            self._send(200, json.dumps({"stored": True, "l2": ok, "bytes": len(value)}).encode())
+
+        def do_POST(self):
+            # Convenience JSON API: {"key":"...","value_b64":"..."} or value string
+            if self.path != "/kv":
+                self._send(404, b'{"error":"not found"}')
+                return
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            try:
+                obj = json.loads(raw.decode("utf-8"))
+            except Exception:
+                self._send(400, b'{"error":"invalid json"}')
+                return
+            key = obj.get("key") or hashlib.sha256(raw).hexdigest()
+            if "value_b64" in obj:
+                import base64
+
+                value = base64.b64decode(obj["value_b64"])
+            else:
+                value = str(obj.get("value", "")).encode("utf-8")
+            l1_put(key, value)
+            ok = l2_put(key, value)
+            with _lock:
+                _stats["stores"] += 1
+                if ok:
+                    _stats["store_l2_ok"] += 1
+                else:
+                    _stats["store_l2_fail"] += 1
+            self._send(200, json.dumps({"key": key, "stored": True, "l2": ok}).encode())
+
+    if __name__ == "__main__":
+        print(
+            "lmcache-mock listening port=%s s3=%s bucket=%s"
+            % (PORT, S3_ENDPOINT or "(disabled)", S3_BUCKET)
+        )
+        ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lmcache
+  namespace: vllm-cpu
+  labels:
+    app: lmcache
+    stage: "2"
+    mock: "true"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lmcache
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: lmcache
+        stage: "2"
+        mock: "true"
+    spec:
+      containers:
+        - name: lmcache
+          image: python:3.12-slim
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PORT
+              value: "6555"
+            - name: L1_MAX_ITEMS
+              value: "256"
+            - name: S3_ENDPOINT
+              value: http://seaweedfs.kubeflow.svc:8333
+            - name: S3_BUCKET
+              value: kv-cache
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: accesskey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: seaweed-s3
+                  key: secretkey
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          command: ["python", "/app/server.py"]
+          ports:
+            - name: http
+              containerPort: 6555
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: "100m"
+              memory: 256Mi
+            limits:
+              cpu: "500m"
+              memory: 512Mi
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: lmcache-mock-code
+            defaultMode: 0555
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lmcache
+  namespace: vllm-cpu
+  labels:
+    app: lmcache
+    stage: "2"
+    mock: "true"
+spec:
+  type: ClusterIP
+  selector:
+    app: lmcache
+  ports:
+    - name: http
+      port: 6555
+      targetPort: http

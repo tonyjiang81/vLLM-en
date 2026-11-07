@@ -1,0 +1,32 @@
+# Allow vllm-cpu lab pods to reach kubeflow/seaweedfs S3 + filer.
+# Additive to the existing kubeflow NetworkPolicy (union of allows).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: seaweedfs-allow-vllm-cpu
+  namespace: kubeflow
+  labels:
+    app.kubernetes.io/part-of: vllm-cpu-lab
+    stage: "2"
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: ["seaweedfs"]
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: vllm-cpu
+      ports:
+        - protocol: TCP
+          port: 8333
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 8888
+        - protocol: TCP
+          port: 18888

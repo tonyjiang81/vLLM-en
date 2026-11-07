@@ -1,0 +1,258 @@
+# Dual GPU vLLM replicas sharing KV via LMCacheConnectorV1 + lmcache service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-a
+  namespace: vllm-gpu
+  labels:
+    app: vllm-a
+    role: shared-kv
+    stage: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-a
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-a
+        role: shared-kv
+        stage: "2"
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.5
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /data
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: LMCACHE_CONFIG_FILE
+              value: /etc/lmcache/lmcache.yaml
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - Qwen/Qwen2.5-7B-Instruct
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --tensor-parallel-size
+            - "1"
+            - --gpu-memory-utilization
+            - "0.90"
+            - --max-model-len
+            - "4096"
+            - --max-num-seqs
+            - "32"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --kv-transfer-config
+            - /etc/vllm/kv-transfer-config.json
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 90
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+            - name: kv-cfg
+              mountPath: /etc/vllm
+              readOnly: true
+            - name: lmcache-cfg
+              mountPath: /etc/lmcache
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 80Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: kv-cfg
+          configMap:
+            name: kv-transfer-config
+        - name: lmcache-cfg
+          configMap:
+            name: lmcache-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-b
+  namespace: vllm-gpu
+  labels:
+    app: vllm-b
+    role: shared-kv
+    stage: "2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-b
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vllm-b
+        role: shared-kv
+        stage: "2"
+    spec:
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.5
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /data
+            - name: HF_HOME
+              value: /data/hf-cache
+            - name: VLLM_CACHE_ROOT
+              value: /data/.cache/vllm
+            - name: LMCACHE_CONFIG_FILE
+              value: /etc/lmcache/lmcache.yaml
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: all
+            - name: PYTHONHASHSEED
+              value: "0"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          args:
+            - Qwen/Qwen2.5-7B-Instruct
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --dtype
+            - bfloat16
+            - --tensor-parallel-size
+            - "1"
+            - --gpu-memory-utilization
+            - "0.90"
+            - --max-model-len
+            - "4096"
+            - --max-num-seqs
+            - "32"
+            - --enable-prefix-caching
+            - --enable-chunked-prefill
+            - --kv-transfer-config
+            - /etc/vllm/kv-transfer-config.json
+            - --disable-log-requests
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 90
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: shm
+              mountPath: /dev/shm
+            - name: kv-cfg
+              mountPath: /etc/vllm
+              readOnly: true
+            - name: lmcache-cfg
+              mountPath: /etc/lmcache
+              readOnly: true
+      volumes:
+        - name: data
+          emptyDir:
+            sizeLimit: 80Gi
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+        - name: kv-cfg
+          configMap:
+            name: kv-transfer-config
+        - name: lmcache-cfg
+          configMap:
+            name: lmcache-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-a
+  namespace: vllm-gpu
+  labels:
+    app: vllm-a
+    stage: "2"
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-a
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-b
+  namespace: vllm-gpu
+  labels:
+    app: vllm-b
+    stage: "2"
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-b
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
