@@ -3,10 +3,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config.env"
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/_common.sh"
 CTX="${KUBE_CONTEXT}"
 NS="${NAMESPACE}"
 
 echo "== Stage2 shared KV (LMCache + dual GPU) =="
+require_gpu_capacity "${CTX}" 2
+
 kubectl --context "${CTX}" apply -f "${ROOT}/manifests/namespace.yaml"
 
 # Scale down Stage1 to free GPU if needed
@@ -15,21 +19,26 @@ if kubectl --context "${CTX}" -n "${NS}" get deploy vllm-single >/dev/null 2>&1;
 fi
 
 # Copy Seaweed S3 credentials into this namespace
-kubectl --context "${CTX}" -n "${SEAWEED_NS}" get secret "${SEAWEED_SECRET}" -o json \
-  | python3 -c "
-import json,sys,os
-d=json.load(sys.stdin)
-out={
-  'apiVersion':'v1','kind':'Secret',
-  'metadata':{'name':'seaweed-s3','namespace':'${NS}','labels':{'stage':'2'}},
-  'type':'Opaque',
-  'data':{
-    'accesskey': d['data'].get('accesskey') or d['data'].get('AWS_ACCESS_KEY_ID') or d['data'].get('accessKey'),
-    'secretkey': d['data'].get('secretkey') or d['data'].get('AWS_SECRET_ACCESS_KEY') or d['data'].get('secretKey'),
-  }
-}
-json.dump(out, sys.stdout)
-" | kubectl --context "${CTX}" apply -f -
+SECRET_JSON="$(kubectl --context "${CTX}" -n "${SEAWEED_NS}" get secret "${SEAWEED_SECRET}" -o json)"
+ACCESS="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["data"].get("accesskey") or d["data"].get("AWS_ACCESS_KEY_ID") or d["data"].get("accessKey") or "")' "${SECRET_JSON}")"
+SECRET="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["data"].get("secretkey") or d["data"].get("AWS_SECRET_ACCESS_KEY") or d["data"].get("secretKey") or "")' "${SECRET_JSON}")"
+if [[ -z "${ACCESS}" || -z "${SECRET}" ]]; then
+  echo "[FAIL] cannot find accesskey/secretkey in ${SEAWEED_NS}/${SEAWEED_SECRET}"
+  exit 1
+fi
+kubectl --context "${CTX}" -n "${NS}" apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: seaweed-s3
+  namespace: ${NS}
+  labels:
+    stage: "2"
+type: Opaque
+data:
+  accesskey: ${ACCESS}
+  secretkey: ${SECRET}
+EOF
 
 kubectl --context "${CTX}" -n "${NS}" delete job seaweed-create-kv-cache-bucket --ignore-not-found >/dev/null 2>&1 || true
 kubectl --context "${CTX}" -n "${NS}" apply -f "${ROOT}/manifests/stage2-shared-kv/bucket-job.yaml"

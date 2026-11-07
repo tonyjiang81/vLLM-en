@@ -24,6 +24,7 @@ deploy/
   README.md
   scripts/
     00-install-operators.sh   # GPU Operator + Network Operator (Helm)
+    00-verify-scripts.sh     # structural verify (no GPU required)
     00-validate.sh
     01-deploy-stage1.sh
     02-deploy-stage2.sh

@@ -3,10 +3,23 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config.env"
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/_common.sh"
 CTX="${KUBE_CONTEXT}"
 NS="${NAMESPACE}"
 
 echo "== Stage3 Prefill/Decode (NixlConnector + pd-proxy) =="
+require_gpu_capacity "${CTX}" 2
+
+if [[ "${REQUIRE_NETWORK_OPERATOR:-0}" == "1" ]]; then
+  keys="$(rdma_resource_keys "${CTX}")"
+  if [[ -z "${keys}" ]]; then
+    echo "[FAIL] REQUIRE_NETWORK_OPERATOR=1 but no rdma/* allocatable"
+    exit 1
+  fi
+  echo "[PASS] RDMA resources: ${keys}"
+fi
+
 kubectl --context "${CTX}" apply -f "${ROOT}/manifests/namespace.yaml"
 
 # Free GPUs from earlier stages

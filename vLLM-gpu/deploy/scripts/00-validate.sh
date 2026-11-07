@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT}/config.env"
+# shellcheck disable=SC1091
+source "${ROOT}/scripts/_common.sh"
 
 CTX="${KUBE_CONTEXT}"
 pass=0
@@ -32,13 +34,16 @@ else
   warn "GPU Operator not detected (standalone device-plugin may still work)"
 fi
 
-GPU_ALLOC="$(kubectl --context "${CTX}" get nodes -o json 2>/dev/null \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(sum(int(n.get("status",{}).get("allocatable",{}).get("nvidia.com/gpu","0")) for n in d.get("items",[])))' 2>/dev/null || echo 0)"
+GPU_ALLOC="$(gpu_alloc_total "${CTX}")"
 echo "     allocatable nvidia.com/gpu total=${GPU_ALLOC}"
+EXISTING_GPU_CHART="$(helm_release_chart "${CTX}" "${GPU_OPERATOR_NS}" gpu-operator || true)"
+if [[ -n "${EXISTING_GPU_CHART}" ]]; then
+  echo "     helm release gpu-operator chart=${EXISTING_GPU_CHART}"
+fi
 if [[ "${GPU_ALLOC}" =~ ^[1-9] ]]; then
   ok "cluster advertises nvidia.com/gpu=${GPU_ALLOC}"
 else
-  bad "no nvidia.com/gpu in node allocatable (run ./scripts/00-install-operators.sh)"
+  bad "no nvidia.com/gpu in node allocatable (need real NVIDIA GPU + GPU Operator; fake-gpu-operator alone is not enough)"
 fi
 
 if kubectl --context "${CTX}" get pods -A -l app.kubernetes.io/name=dcgm-exporter -o name 2>/dev/null | head -1 | grep -q .; then
@@ -50,17 +55,7 @@ else
 fi
 
 # --- Network Operator / RDMA ---
-RDMA_KEYS="$(kubectl --context "${CTX}" get nodes -o json 2>/dev/null \
-  | python3 -c '
-import sys,json
-d=json.load(sys.stdin)
-keys=set()
-for n in d.get("items",[]):
-  for k in (n.get("status",{}).get("allocatable") or {}):
-    if k.startswith("rdma/") or "rdma" in k.lower():
-      keys.add(k)
-print(",".join(sorted(keys)) if keys else "")
-' 2>/dev/null || true)"
+RDMA_KEYS="$(rdma_resource_keys "${CTX}")"
 
 if kubectl --context "${CTX}" get ns nvidia-network-operator >/dev/null 2>&1 \
   || kubectl --context "${CTX}" get deploy -A 2>/dev/null | grep -qi 'network-operator'; then
