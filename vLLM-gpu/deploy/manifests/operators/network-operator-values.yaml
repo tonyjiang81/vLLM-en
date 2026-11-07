@@ -1,0 +1,21 @@
+# Helm values for nvidia/network-operator
+# Docs: https://docs.nvidia.com/networking/display/kubernetesdoranv
+# Required for production cross-node PD KV handoff over RDMA (InfiniBand / RoCE).
+#
+# Adjust NicClusterPolicy after install to match NIC vendor / OFED vs inbox drivers.
+nfd:
+  enabled: true
+deployCR: true
+ofedDriver:
+  deploy: false
+rdmaSharedDevicePlugin:
+  deploy: true
+  resources:
+    - name: rdma_shared_device_a
+      vendors: []
+sriovDevicePlugin:
+  deploy: false
+secondaryNetwork:
+  deploy: false
+operator:
+  repository: nvcr.io/nvidia/cloud-native

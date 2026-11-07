@@ -28,6 +28,7 @@ GPU / CUDA:
 ```bash
 cd vLLM-gpu/deploy
 set -a && source ./config.env && set +a
+./scripts/00-install-operators.sh   # GPU Operator + Network Operator
 ./scripts/00-validate.sh
 ./scripts/01-deploy-stage1.sh
 ./scripts/smoke-test.sh stage1

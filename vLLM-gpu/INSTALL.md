@@ -1,9 +1,15 @@
 Deploy a production-ready enterprise large-model inference gateway in an NVIDIA GPU (CUDA) environment. This directory covers only the real GPU production path.
 
-Staged K8s deployment package: `deploy/` (Stage 1 single engine -> Stage 2 LMCache shared KV -> Stage 3 Prefill/Decode + DCGM monitoring).  
+Staged K8s deployment package: `deploy/` (Stage 0 operators -> Stage 1 single engine -> Stage 2 LMCache shared KV -> Stage 3 Prefill/Decode + DCGM monitoring).  
 CPU-based lab counterpart: `../vLLM-cpu/deploy` (CPU simulation following the same staged narrative).
 
-Hardware prerequisites (adapt to the actual machines): at least one NVIDIA GPU (at least 24 GB of VRAM is recommended for running `Qwen2.5-7B` at half precision; use quantization or a smaller model with less VRAM), a compatible CUDA driver, and nvidia-container-toolkit. GPUs must be schedulable from K8s through the Device Plugin or GPU Operator. Production cross-node PD also requires an RDMA network such as InfiniBand, RoCE, or EFA.
+Hardware prerequisites (adapt to the actual machines): at least one NVIDIA GPU (at least 24 GB of VRAM is recommended for running `Qwen2.5-7B` at half precision; use quantization or a smaller model with less VRAM), a compatible CUDA driver stack, and RDMA NICs for production cross-node PD (InfiniBand, RoCE, or EFA).
+
+Platform operators (install once per cluster via `deploy/scripts/00-install-operators.sh`):
+
+- **NVIDIA GPU Operator**: installs / manages driver (optional if host driver exists), container toolkit, device plugin, GPU Feature Discovery, and DCGM Exporter. This is what makes `nvidia.com/gpu` allocatable so Stage 1+ Pods can schedule. Values: `deploy/manifests/operators/gpu-operator-values.yaml`.
+- **NVIDIA Network Operator**: installs RDMA Shared Device Plugin (and optional OFED / secondary network components). This is what makes `rdma/*` allocatable for Stage 3 cross-node NIXL KV handoff. Values: `deploy/manifests/operators/network-operator-values.yaml`. Sample `NicClusterPolicy`: `deploy/manifests/operators/nic-cluster-policy.yaml` (edit NIC vendors / device IDs for your hardware).
+- Stage mapping: Stage 1/2 require GPU Operator. Stage 3 cross-node PD requires GPU Operator + Network Operator. Same-node drills may set `SKIP_NETWORK_OPERATOR=1` and drop `rdma/*` from Stage 3 manifests.
 
 1. Core Features to Implement
 
@@ -33,7 +39,7 @@ Hardware prerequisites (adapt to the actual machines): at least one NVIDIA GPU (
 
 Automation Steps for Cursor
 
-1. Step 1: check the NVIDIA driver, `nvidia-smi`, and CUDA visibility; create and activate the `vllm-gpu` environment.
-2. Step 2: install the CUDA-enabled torch and vLLM from the official GPU index or wheel.
-3. Step 3: write the GPU launch command with the model, dtype, VRAM threshold, `max_num_seqs`, `max_num_batched_tokens`, and port `8000`; add KV-aware routing, Mooncake/LMCache, or PD (Prefill/Decode + NIXL/RDMA) configuration when needed.
-4. Step 4: validate streaming chat/completions; inspect `gpu_cache_usage_*`, latency, throughput, and preemption in `/metrics`; for PD, also test isolation between a long prefill request and concurrent short decode requests.
+1. Step 1: on the K8s cluster, run `deploy/scripts/00-install-operators.sh` (GPU Operator; Network Operator unless `SKIP_NETWORK_OPERATOR=1`), then `deploy/scripts/00-validate.sh` until `nvidia.com/gpu` (and for Stage 3 RDMA, `rdma/*`) is allocatable.
+2. Step 2: confirm host `nvidia-smi` / driver matrix matches the chosen `vllm/vllm-openai` image tag in `deploy/config.env`.
+3. Step 3: deploy Stage 1 -> 2 -> 3 with the scripts under `deploy/scripts/`; for Stage 3 edit `nic-cluster-policy.yaml` for your NICs and set `REQUIRE_NETWORK_OPERATOR=1` on validate.
+4. Step 4: validate streaming chat/completions; inspect `gpu_cache_usage_*`, latency, throughput, and preemption in `/metrics` and DCGM GPU util; for PD, also test isolation between a long prefill request and concurrent short decode requests.

@@ -1,0 +1,20 @@
+# Helm values for nvidia/gpu-operator
+# Docs: https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/getting-started.html
+#
+# If the host already has a working NVIDIA driver, set driver.enabled=false.
+driver:
+  enabled: true
+toolkit:
+  enabled: true
+devicePlugin:
+  enabled: true
+dcgmExporter:
+  enabled: true
+gfd:
+  enabled: true
+migManager:
+  enabled: false
+nodeStatusExporter:
+  enabled: true
+operator:
+  defaultRuntime: containerd

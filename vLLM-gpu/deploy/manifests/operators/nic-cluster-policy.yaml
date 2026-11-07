@@ -1,0 +1,30 @@
+# Sample NicClusterPolicy for RDMA Shared Device Plugin.
+# Apply after Network Operator is Ready. Edit vendors/deviceIDs for your NICs.
+# Resource name below is requested by Stage3 Prefill/Decode as rdma/rdma_shared_device_a
+# (or map to rdma/ib via your site convention).
+apiVersion: mellanox.com/v1alpha1
+kind: NicClusterPolicy
+metadata:
+  name: rdma-shared-dp
+  labels:
+    app.kubernetes.io/part-of: vllm-gpu
+spec:
+  rdmaSharedDevicePlugin:
+    image: k8s-rdma-shared-dev-plugin
+    repository: ghcr.io/mellanox
+    version: latest-amd64
+    config: |
+      {
+        "configList": [
+          {
+            "resourceName": "rdma_shared_device_a",
+            "rdmaHcaMax": 63,
+            "selectors": {
+              "vendors": ["15b3"],
+              "deviceIDs": [],
+              "ifNames": [],
+              "drivers": []
+            }
+          }
+        ]
+      }

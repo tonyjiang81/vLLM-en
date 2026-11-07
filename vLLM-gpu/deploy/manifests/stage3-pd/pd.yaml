@@ -1,6 +1,10 @@
 # Prefill / Decode disaggregation entry for CUDA clusters.
 # Prefill = kv_producer, Decode = kv_consumer via NixlConnector.
 # Front door is pd-proxy (OpenAI-compatible). Swap proxy for Dynamo/vllm-router when needed.
+#
+# Cross-node PD expects NVIDIA GPU Operator + Network Operator (RDMA).
+# Prefill/Decode request rdma/rdma_shared_device_a from NicClusterPolicy.
+# For same-node drills without RDMA, remove the rdma/* lines under resources.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -197,10 +201,12 @@ spec:
               cpu: "4"
               memory: 16Gi
               nvidia.com/gpu: "1"
+              rdma/rdma_shared_device_a: "1"
             limits:
               cpu: "8"
               memory: 32Gi
               nvidia.com/gpu: "1"
+              rdma/rdma_shared_device_a: "1"
           volumeMounts:
             - name: data
               mountPath: /data
@@ -300,10 +306,12 @@ spec:
               cpu: "4"
               memory: 16Gi
               nvidia.com/gpu: "1"
+              rdma/rdma_shared_device_a: "1"
             limits:
               cpu: "8"
               memory: 32Gi
               nvidia.com/gpu: "1"
+              rdma/rdma_shared_device_a: "1"
           volumeMounts:
             - name: data
               mountPath: /data
