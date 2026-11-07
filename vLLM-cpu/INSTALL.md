@@ -28,11 +28,9 @@ Avoid treating this exercise as the default production architecture for everyone
 - **Model loading:** By default, `--model facebook/opt-125m` loads approximately 250MB of real weights. To skip downloading weights, add `--load-format dummy`, or the equivalent `VLLM_TEST_FLAGS="dummy_weights=1"`, to read the architecture and fill weights randomly.
 - **Persist system-level tuning parameters:** For the single-process exercise, specify `--model facebook/opt-125m`, `--gpu-memory-utilization 0.60`, `--enable-prefix-caching`, `--enable-chunked-prefill true`, and a moderate `--swap-space` in the startup command. It only needs to demonstrate eviction; reserving 16GB as if the model were 7B is unnecessary. For the network-distributed prefix-cache exercise, connect each vLLM Pod to the in-cluster `lmcache` Service, use reduced values for `--max-model-len`, `--swap-space`, and `--gpu-memory-utilization`, and disable `--enable-prefix-caching`. For the network-disk exercise, keep SeaweedFS available and point the LMCache cold tier to `seaweedfs.kubeflow.svc`, preferably S3 on `8333` or alternatively Filer on `8888`. All vLLM Pods share one remote path, such as the `kv-cache` bucket or directory, while retaining a small CPU buffer for remote reads and writes. For the PD exercise, set `kv_role=kv_producer` on Prefill and `kv_role=kv_consumer` on Decode, or share only LMCache keys for fake PD. The proxy continues to expose one unified OpenAI endpoint.
 
-## Automation Steps for Cursor
+## Setup steps
 
-Guide Cursor to write and execute the following steps automatically:
-
-1. **Step 1:** Inspect the local environment, then automatically create and activate the `vllm-mock` Conda environment.
+1. **Step 1:** Inspect the local environment, then create and activate the `vllm-mock` Conda environment.
 2. **Step 2:** Install from official sources. Use https://pypi.org/simple for Python packages and https://download.pytorch.org/whl/cpu for the CPU-only build of PyTorch, then install the core vLLM server engine. Singapore has no equivalent public PyPI or PyTorch mirror. The official sources use a global CDN and are faster than routing through a mainland China mirror.
-3. **Step 3:** Write and launch the final one-command simulation startup command. Persist all mock environment variables and system-tuning parameters, and bind the standard OpenAI API and metrics endpoint to local port `8000`.
-4. **Step 4:** Print guidance in the terminal and include two `curl` verification commands: one to simulate a streaming generation load test, and one to retrieve `gpu_cache_usage_factor`, GPU-memory page saturation, and Swap eviction metrics in real time.
+3. **Step 3:** Launch the one-command simulation startup. Persist mock environment variables and system-tuning parameters, and bind the OpenAI API and metrics endpoint to local port `8000`.
+4. **Step 4:** Verify with two `curl` commands: one streaming generation request, and one that reads `gpu_cache_usage_factor`, GPU-memory page saturation, and Swap eviction metrics.

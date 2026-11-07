@@ -37,7 +37,7 @@ Platform operators (install once per cluster via `deploy/scripts/00-install-oper
 - System-level tuning: use [Optimization and Tuning](https://docs.vllm.ai/en/stable/configuration/optimization/) as the authority. After confirming the default APC and chunked prefill state on a single replica, tune `gpu_memory_utilization` (the documented default is 0.92), `max_num_seqs`, `max_num_batched_tokens`, and `max_model_len`; monitor preemption with Prometheus. For multiple replicas, start with KV-aware routing; add Mooncake/LMCache only when cross-replica reuse is needed. For PD, use `NixlConnector` or `MooncakeConnector` with Dynamo topology placement and RDMA.
 - Multiple GPUs: use `--tensor-parallel-size` for multiple GPUs on one host, then `pipeline_parallel_size` across hosts. Scale Prefill and Decode pools independently; do not confuse this with TP.
 
-Automation Steps for Cursor
+## Setup steps
 
 1. Step 1: on the K8s cluster, run `deploy/scripts/00-install-operators.sh` (GPU Operator; Network Operator unless `SKIP_NETWORK_OPERATOR=1`), then `deploy/scripts/00-validate.sh` until `nvidia.com/gpu` (and for Stage 3 RDMA, `rdma/*`) is allocatable.
 2. Step 2: confirm host `nvidia-smi` / driver matrix matches the chosen `vllm/vllm-openai` image tag in `deploy/config.env`.
